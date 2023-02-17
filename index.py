@@ -3,8 +3,9 @@ from flask_cors import CORS, cross_origin
 
 app = Flask(__name__)
 cors = CORS(app)
-# app.config['CORS_HEADERS'] = 'Content-Type'
 
+# TODO, add postgresql db, change folder structure, apply MVC, dependency injection
+# TODO, validation and 
 
 products = [
     {
@@ -28,13 +29,16 @@ products = [
 ]
 
 def get_product_by_id(id):
-    return list(filter(lambda d: d['id'] == id, products))[0]
+    product = list(filter(lambda d: d['id'] == id, products))
+    if len(product) >= 1:
+        print("the product", product)
+        return product[0]
+    return None
 
 def update_product_count(id,new_count):
     for product in products:
         if product["id"] == id:
             product.update({"in_stock_quantity":new_count})
-
 
 @app.route("/products", methods=["GET"])
 def get_products():
@@ -55,3 +59,51 @@ def checkout():
     except Exception as e:
         print(str(e))
         return jsonify({"message":"Something went wrong"}),404
+
+@app.route("/products", methods=["POST"])
+def add_product():
+    try:
+        product = request.json["product"]
+        if product["name"] in list(map(lambda d: d["name"], products)):
+            return jsonify({"message": "The resource already exists"}), 409
+        else:
+            if len(products) >= 1:
+                max_id = max(list(map(lambda d: d["id"],products)))
+                product["id"] = int(max_id) + 1
+                products.append(product)
+            product["id"] = 1
+            products.append(product)
+            return jsonify({"message": "Succesfully added"}), 200
+    except Exception as e:
+        print(str(e))
+        return jsonify({"message" : "Something went wrong"}), 404
+
+@app.route("/product/<id>", methods=["DELETE"])
+def delete_product(id):
+    try:
+        product = get_product_by_id(int(id))
+        if (product is not None):
+            global products
+            products = list(filter(lambda d: d["id"] != int(id), products))
+            return jsonify({"message": "Succesfully removed"}), 200
+        return jsonify({"message": "The item was not found"}), 404
+    except Exception as e:
+        return jsonify({"message" : "Something went wrong"}), 404
+    
+@app.route("/product/<id>", methods=["PUT"])
+def update_product(id):
+    try:
+        product_id = int(id)
+        update_data = request.json["product"]
+        product = get_product_by_id(product_id)
+        if (product is not None):
+            global products
+            # products = list(map(lambda d: d.update(update_data), products))
+            for product in products:
+                if product["id"] == product_id:
+                    product.update(update_data)
+                    
+            return jsonify({"message": "Succesfully updated"}), 200
+        return jsonify({"message": "The item was not found"}), 404
+    except Exception as e:
+        return jsonify({"message": "Something went wrong"}), 404
