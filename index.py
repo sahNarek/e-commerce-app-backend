@@ -31,7 +31,6 @@ products = [
 def get_product_by_id(id):
     product = list(filter(lambda d: d['id'] == id, products))
     if len(product) >= 1:
-        print("the product", product)
         return product[0]
     return None
 
@@ -49,15 +48,14 @@ def checkout():
     try:
         items = request.json["items"]
         for item in items:
-            product = get_product_by_id(item["id"])
-            if int(item["quantity"]) > product["in_stock_quantity"]:
+            product = get_product_by_id(int(item["id"]))
+            if int(item["quantity"]) > int(product["in_stock_quantity"]):
                 return jsonify({
                     "message":f"The item {item['name']} is not available in {item['quantity']} units"
                     }),404
-            update_product_count(item["id"], product["in_stock_quantity"] - int(item["quantity"]))
+            update_product_count(int(item["id"]), int(product["in_stock_quantity"]) - int(item["quantity"]))
         return jsonify({"message": "The purchase was succesfully completed"}),200
     except Exception as e:
-        print(str(e))
         return jsonify({"message":"Something went wrong"}),404
 
 @app.route("/products", methods=["POST"])
@@ -75,7 +73,6 @@ def add_product():
             products.append(product)
             return jsonify({"message": "Succesfully added"}), 200
     except Exception as e:
-        print(str(e))
         return jsonify({"message" : "Something went wrong"}), 404
 
 @app.route("/product/<id>", methods=["DELETE"])
