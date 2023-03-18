@@ -11,6 +11,8 @@ from pymongo import MongoClient
 import jwt
 from functools import wraps
 from datetime import datetime
+import math
+import socket
 
 
 # HUGE TODO BREAK EVERYTHING INTO SMALLER MODULES
@@ -29,13 +31,34 @@ mongo_db = cluster['e-commerece-app-db']
 products_collection = mongo_db.products
 orders_collection = mongo_db.orders
 sessions_collection = mongo_db.sessions
+requests_collection = mongo_db.requests
+logs_collection = mongo_db.server_logs
+# Add mongo response handling and logging
 
 
 from models import User
 
+
 def get_product_by_id(id):  
     return products_collection.find_one({"_id": ObjectId(id)})
 
+def log_request(f):
+    @wraps(f)
+    def loger(*args, **kwargs):
+        current_port = request.environ.get('SERVER_PORT')
+        instance = requests_collection.find_one({'port': current_port})
+        if instance:
+            instance_id = str(instance["_id"])
+        else:
+            instance = requests_collection.insert_one({"port": current_port})
+            instance_id = instance.inserted_id
+        
+        logs_collection.insert_one({"server_id": instance_id, "method": request.method, "endpoint": request.endpoint})
+        print(f"The server {instance_id} on port {current_port} received a request")
+
+        return f(*args, **kwargs)
+    
+    return loger
 
 def token_required(f):
     @wraps(f)
@@ -64,6 +87,7 @@ def token_required(f):
 
 
 @app.route("/current-user", methods=["GET"])
+@log_request
 @token_required
 def current_user(current_user):
     return jsonify({"current_user": current_user.to_dict()})
@@ -83,8 +107,8 @@ def signup():
     except SQLAlchemyError as e:
         return jsonify({"message": "Validation failed"}), 403
     
-
 @app.route('/sign-in', methods =['POST'])
+@log_request
 def login():
     auth = request.json
   
@@ -122,6 +146,7 @@ def login():
 
 
 @app.route("/products", methods=["GET"])
+@log_request
 def get_products():
     products_list = []
 
@@ -142,6 +167,7 @@ def get_products():
 
 
 @app.route("/add-to-cart", methods=["POST"])
+@log_request
 @token_required
 def add_to_cart(current_user):
     try:
@@ -156,6 +182,7 @@ def add_to_cart(current_user):
         return jsonify({"message":"Something went wrong"}),404
 
 @app.route("/checkout", methods=["POST"])
+@log_request
 @token_required
 def checkout(current_user):
     try:
@@ -190,6 +217,7 @@ def checkout(current_user):
         return jsonify({"message":"Something went wrong"}),404
 
 @app.route("/products", methods=["POST"])
+@log_request
 def add_product():
     try:
         product = request.json["product"]
@@ -202,6 +230,7 @@ def add_product():
         return jsonify({"message" : "Something went wrong"}), 404
 
 @app.route("/product/<id>", methods=["DELETE"])
+@log_request
 def delete_product(id):
     try:
         product = get_product_by_id(id)
@@ -213,6 +242,7 @@ def delete_product(id):
         return jsonify({"message" : "Something went wrong"}), 404
     
 @app.route("/product/<id>", methods=["PUT"])
+@log_request
 def update_product(id):
     try:
         update_data = request.json["product"]
