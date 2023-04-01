@@ -14,6 +14,7 @@ from datetime import datetime
 from flask_caching import Cache
 import redis
 import json
+import time
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ['SECRET_KEY']
@@ -35,6 +36,16 @@ requests_collection = mongo_db.requests
 logs_collection = mongo_db.server_logs
 
 from models import User
+
+def get_current_user_from_cache():
+    
+    current_user = redis_client.get("current_user")
+
+    if current_user is not None:
+        print("Cache hit for users")
+        return json.loads(redis_client.get('current_user').decode('utf-8'))
+
+    return None
 
 
 def get_product_by_id(id):  
@@ -69,8 +80,10 @@ def find_product_from_cache(attribute,value):
     if cached_products is None:
         return None
     for cached_product in cached_products:
+        print("Cache hit for products")
         if cached_product[attribute] == value:
             return cached_product
+    print("Cache miss for products")
     return None
 
 def log_request(f):
@@ -102,18 +115,34 @@ def token_required(f):
   
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'],algorithms=['HS256'])
-            current_user = User.query\
-                .filter_by(email = data['public_id'])\
-                .first()
-        except:
+            expiration_time = data.get('exp')
+            current_user_from_cache = get_current_user_from_cache()
+            current_time = int(time.time())
+            ttl = expiration_time - current_time
+            if current_user_from_cache is None:
+                print("Cache miss for users")
+                current_user_from_db = User.query\
+                    .filter_by(email = data['public_id'])\
+                    .first()
+                
+                if current_user_from_db is None:
+                    return jsonify({"message": "User not found"}, 404)
+
+                current_user = current_user_from_db
+            else:
+                current_user = current_user_from_cache
+
+            redis_client.set("current_user",json.dumps(current_user))
+            redis_client.rpush('cache_queue', json.dumps(current_user))
+            redis_client.expire('current_user', ttl)
+
+            return f(current_user_from_cache, *args, **kwargs)
+        except Exception as e:
+            print(e)
             return jsonify({
                 'message' : 'Token is invalid !!'
             }), 401
-        if current_user is not None:
-            return  f(current_user, *args, **kwargs)
         
-        return jsonify({"message": "User not found"}, 404)
-
     return decorated
 
 
@@ -121,7 +150,7 @@ def token_required(f):
 @log_request
 @token_required
 def current_user(current_user):
-    return jsonify({"current_user": current_user.to_dict()})
+    return jsonify({"current_user": current_user})
 
 @app.route("/sign-up", methods=["POST"])
 def signup():
