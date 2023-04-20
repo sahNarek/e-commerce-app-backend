@@ -15,6 +15,7 @@ from flask_caching import Cache
 import redis
 import json
 import time
+import requests
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ['SECRET_KEY']
@@ -24,6 +25,7 @@ app.config.from_object(os.environ['APP_SETTINGS'])
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 MONGO_URI = os.environ.get('MONGO_URI')
+PRODUCTS_API_URL = os.environ.get("PRODUCTS_API_URL")
 cluster = MongoClient(MONGO_URI)
 cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': 'redis://localhost:6379/0'})
 redis_client = redis.Redis(host='localhost', port=6379, db=0)
@@ -45,45 +47,6 @@ def get_current_user_from_cache():
         print("Cache hit for users")
         return json.loads(redis_client.get('current_user').decode('utf-8'))
 
-    return None
-
-
-def get_product_by_id(id):  
-    return products_collection.find_one({"_id": ObjectId(id)})
-
-def get_cached_products():
-    products_list = redis_client.get("products")
-
-    if products_list is not None:
-        return json.loads(redis_client.get('products').decode('utf-8'))
-
-    return None
-
-
-def update_cached_products(id, update_data):
-    cached_products = get_cached_products()
-    if cached_products is None:
-        return None
-    for cached_product in cached_products:
-        if cached_product["id"] == id:
-            cached_product.update(update_data)
-
-    redis_client.set("products", json.dumps(cached_products))
-
-def delete_product_from_cache(id):
-    cached_products = get_cached_products()
-    filtered_products = [product for product in cached_products if product["id"] != id]
-    redis_client.set("products", json.dumps(filtered_products))
-
-def find_product_from_cache(attribute,value):
-    cached_products = get_cached_products()
-    if cached_products is None:
-        return None
-    for cached_product in cached_products:
-        print("Cache hit for products")
-        if cached_product[attribute] == value:
-            return cached_product
-    print("Cache miss for products")
     return None
 
 def log_request(f):
@@ -128,17 +91,15 @@ def token_required(f):
                 if current_user_from_db is None:
                     return jsonify({"message": "User not found"}, 404)
 
-                current_user = current_user_from_db
+                current_user = current_user_from_db.to_dict()
             else:
                 current_user = current_user_from_cache
-
             redis_client.set("current_user",json.dumps(current_user))
             redis_client.rpush('cache_queue', json.dumps(current_user))
             redis_client.expire('current_user', ttl)
 
-            return f(current_user_from_cache, *args, **kwargs)
+            return f(current_user, *args, **kwargs)
         except Exception as e:
-            print(e)
             return jsonify({
                 'message' : 'Token is invalid !!'
             }), 401
@@ -208,36 +169,22 @@ def login():
 @app.route("/products", methods=["GET"])
 @log_request
 def get_products():
-    cached_products = get_cached_products()
-    if cached_products is not None:
-        return jsonify(cached_products)
+    try:
 
-    products_list = []
-    mongo_products = products_collection.find()
-
-    for item in mongo_products:
-        product_dict = {
-            "id": str(item['_id']),
-            "name"    : str(item['name']),
-            "price"   : int(item['price']),
-            "in_stock_quantity": int(item['in_stock_quantity'])
-        }
-        products_list.append(product_dict)
-        redis_client.set('products', json.dumps(products_list))
-
-    return jsonify(products_list)
-
+        response = requests.get(f"{PRODUCTS_API_URL}/products")
+        return jsonify(response.json())
+    
+    except Exception as e:
+        return jsonify({"message":"Something went wrong"}),404
 
 @app.route("/add-to-cart", methods=["POST"])
 @log_request
 @token_required
 def add_to_cart(current_user):
     try:
-        item = request.json['item']
-        sessions_collection.update_many({'public_id': current_user.email}, 
-                                        {'$addToSet': { 'items_added': item } })
-        return jsonify({"message": "Item added to the cart"}, 200)
-        
+        response = requests.post(f"{PRODUCTS_API_URL}/add-to-cart", json={"current_user": current_user, "item": request.json["item"]})
+        return jsonify(response.json())
+    
     except Exception as e:
         return jsonify({"message":"Something went wrong"}),404
 
@@ -246,92 +193,38 @@ def add_to_cart(current_user):
 @token_required
 def checkout(current_user):
     try:
-        items = request.json["items"]
-        for item in items:
-            product = get_product_by_id((item["id"]))
-            if int(item["quantity"]) > int(product["in_stock_quantity"]):
-                orders_collection.insert_one({
-                    "items": items, 
-                    "public_id": current_user.email,
-                    "status": "Out of Stock",
-                    "order_date": datetime.now()
-                })
-                return jsonify({
-                    "message":f"The item {item['name']} is not available in {item['quantity']} units"
-                    }),404
-            update_data = {
-                "in_stock_quantity": int(product["in_stock_quantity"]) - int(item["quantity"])
-            }
-            products_collection.update_many({"_id": ObjectId(item["id"])}, 
-                                            {"$set": update_data})
-            
-            orders_collection.insert_one({
-                "items": items, 
-                "public_id": current_user.email,
-                "status": "Purchased",
-                "order_date": datetime.now()
-            })
-
-        return jsonify({"message": "The purchase was succesfully completed"}),200
+        response = requests.post(f"{PRODUCTS_API_URL}/checkout", json={"current_user": current_user, "items": request.json["items"]})
+        return jsonify(response.json())
+    
     except Exception as e:
         return jsonify({"message":"Something went wrong"}),404
-
+    
 @app.route("/products", methods=["POST"])
 @log_request
 def add_product():
     try:
-        request_data = request.json["product"]
-        cached_products = get_cached_products()
-        product = find_product_from_cache("name", request_data["name"])
-
-        if product is not None:
-            return jsonify({"message": "The resource already exists"}), 409
-        
-        result = products_collection.insert_one(request_data)
-        request_data["id"] = str(result.inserted_id)
-        del request_data["_id"]
-        if cached_products is None:
-            cached_products = [request_data]
-        else:
-            cached_products.append(request_data)
-        redis_client.set('products', json.dumps(cached_products))
-        return jsonify({"message": "Succesfully added"}), 200
-
+        response = requests.post(f"{PRODUCTS_API_URL}/products", json={"product": request.json["product"]})
+        return jsonify(response.json())
+    
     except Exception as e:
-        print("the exception", e)
-        return jsonify({"message" : "Something went wrong"}), 404
+        return jsonify({"message":"Something went wrong"}),404
 
 @app.route("/product/<id>", methods=["DELETE"])
 @log_request
 def delete_product(id):
     try:
-        product = find_product_from_cache("id", id)
-        if product is None:
-            return jsonify({"message": "The item was not found"}), 404
-        
-        filtered_products = delete_product_from_cache(id)
-        products_collection.delete_many({"_id": ObjectId(id)})
-        redis_client.set("products", json.dumps(filtered_products))
-        return jsonify({"message": "Succesfully removed"}), 200
+        response = requests.delete(f"{PRODUCTS_API_URL}/product/{id}")
+        return jsonify(response.json())
     
     except Exception as e:
-        print(e)
-        return jsonify({"message" : "Something went wrong"}), 404
-    
+        return jsonify({"message":"Something went wrong"}),404
+
 @app.route("/product/<id>", methods=["PUT"])
 @log_request
 def update_product(id):
     try:
-        update_data = request.json["product"]
-        product = find_product_from_cache("id", id)
-        if product is None:
-            return jsonify({"message": "The item was not found"}), 404
-        
-        products_collection.update_many({'_id': ObjectId(id)}, {'$set': update_data})
-        update_cached_products(id, update_data)
-        return jsonify({"message": "Succesfully updated"}), 200
-        
-    except Exception as e:
-        print("the exception", e)
-        return jsonify({"message": "Something went wrong"}), 404
+        response = requests.put(f"{PRODUCTS_API_URL}/product/{id}", json={"product": request.json["product"]})
+        return jsonify(response.json())
     
+    except Exception as e:
+        return jsonify({"message":"Something went wrong"}),404
